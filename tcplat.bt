@@ -1,0 +1,95 @@
+#include <net/request_sock.h>
+#include <net/tcp.h>
+#include <linux/ip.h>
+
+/*
+    The sk_buff arg doesn't exist until sometime after 5.8.10,
+    so I think the best I can grab is what's in the request_sock structure.
+    Starting in, I think, 5.10, request_sock has struct saved_syn, and prior versions u32* saved_syn,
+    but ends up being converted to a none-type during bpftrace compiling.
+
+    socket address (arg0) also doesn't seem to be useful here.
+
+    tcp_v4_conn_request might be an alternative here that still has less overhead than tcp_v4_rcv
+
+    With out something we can use for UUID to match between the two probes, or at least the 4-part tuple,
+    this has limited usefulness outside of a pretty specific environment, but it works as a simple POC,
+    and probably only needs a little more work to be fully useful.
+*/
+/*
+    References:
+        https://elixir.bootlin.com/linux/v5.8.18/source/include/net/request_sock.h
+        https://elixir.bootlin.com/linux/v5.8.10/source/net/ipv4/tcp_ipv4.c#L964
+*/
+kprobe:tcp_v4_send_synack /arg5 == TCP_SYNACK_NORMAL/ { 
+    $sock = (struct request_sock *)arg3;
+
+    $daddr = ntop($sock->__req_common.skc_daddr);
+    $saddr = ntop($sock->__req_common.skc_rcv_saddr);
+    $dport = ($sock->__req_common.skc_dport >> 8 | (($sock->__req_common.skc_dport << 8) & 0xff00));
+
+        if(!@start[tid,$daddr,$saddr, $dport]){
+            @start[tid,$daddr,$saddr, $dport] = nsecs;
+        }
+
+}
+
+
+
+tracepoint:sock:inet_sock_set_state /args->newstate == (int32)TCP_ESTABLISHED/ {
+
+    $daddr = ntop(args->daddr);
+    $saddr = ntop(args->saddr);
+    
+    $dport = args->dport;
+    $sport = args->sport;
+
+    if(@start[tid,$daddr, $saddr, $dport]) {
+        $diff = (nsecs - @start[tid,$daddr, $saddr, $dport]) / 1000;
+        @duration[tid,$daddr, $saddr, $dport] = $diff; // Report microseconds
+        @duration_hist[tid,$daddr, $saddr, $dport] = hist($diff);
+        delete(@start[tid,$daddr, $saddr, $dport]);  
+    }
+}
+
+
+
+/*
+    This is definitely a few micro seconds sooner in the stack than tracepoint:sock:inet_sock_set_stat,
+    but it should come with much more overhead in high-volume/traffic environments.
+*/
+/*
+    References:
+        https://elixir.bootlin.com/linux/v5.8.10/source/include/linux/skbuff.h#L2483
+*/
+/*
+kprobe:tcp_v4_rcv {
+    $skb = (struct sk_buff *)arg0;
+    $ip_header = (struct iphdr *)($skb->head + $skb->network_header);
+    $tcp_header = (struct tcphdr *)($skb->head + $skb->transport_header);
+
+    $daddr = ntop($ip_header->daddr);
+    $saddr = ntop($ip_header->saddr);
+    
+    $dport = $tcp_header->dest >> 8 | (($tcp_header->dest << 8) & 0xff00);
+    $sport = $tcp_header->source >> 8 | (($tcp_header->source << 8) & 0xff00);
+
+    if(@start[tid,$saddr, $daddr, $sport]) {
+        $diff = (nsecs - @start[tid,$saddr, $daddr, $sport]) / 1000; // Report microseconds
+        @duration[tid,$saddr, $daddr, $sport] = diff; 
+        @duration_hist[tid,$saddr, $daddr, $sport] = hist(diff);
+        delete(@start[tid,$saddr, $daddr, $sport]);  // saddr and daddr are reversed through out all this, compared to tcp_v4_send_synack because of the direction of the packet.
+    }
+}
+*/
+
+
+END {
+    printf("\n\n");
+    print(@duration);
+    print(@duration_hist);
+    
+    clear(@duration);
+    clear(@duration_hist);
+    clear(@start);
+}
