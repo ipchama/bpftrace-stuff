@@ -3,19 +3,24 @@
 #include <linux/ip.h>
 
 /*
+*  This attempts to "passively" measure latency between a server and remote clients by measuring the time
+*  between SYN-ACK and the final ACK of a typical TCP handshake.
+*
+*  NOTE: This won't work for fast opens.
+*
+*/
+
+/*
     The sk_buff arg doesn't exist until sometime after 5.8.10,
     so I think the best I can grab is what's in the request_sock structure.
     Starting in, I think, 5.10, request_sock has struct saved_syn, and prior versions u32* saved_syn,
     but ends up being converted to a none-type during bpftrace compiling.
 
-    socket address (arg0) also doesn't seem to be useful here.
+    With out something we can use for UUID to match between the two probes, we're left with the 4-part tuple.
 
-    tcp_v4_conn_request might be an alternative here that still has less overhead than tcp_v4_rcv
+    (socket address (arg0) also doesn't seem to be useful here.)
 
-    With out something we can use for UUID to match between the two probes, or at least the 4-part tuple,
-    this has limited usefulness outside of a pretty specific environment, but it works as a simple POC,
-    and probably only needs a little more work to be fully useful.
-*/
+
 /*
     References:
         https://elixir.bootlin.com/linux/v5.8.18/source/include/net/request_sock.h
@@ -27,15 +32,20 @@ kprobe:tcp_v4_send_synack /arg5 == TCP_SYNACK_NORMAL/ {
     $daddr = ntop($sock->__req_common.skc_daddr);
     $saddr = ntop($sock->__req_common.skc_rcv_saddr);
     $dport = ($sock->__req_common.skc_dport >> 8 | (($sock->__req_common.skc_dport << 8) & 0xff00));
+    $sport = $sock->__req_common.skc_num;
 
-        if(!@start[tid,$daddr,$saddr, $dport]){
-            @start[tid,$daddr,$saddr, $dport] = nsecs;
+        if(!@start[tid,$daddr,$saddr, $dport, $sport]){
+            @start[tid,$daddr,$saddr, $dport, $sport] = nsecs;
         }
 
 }
 
 
 
+/*
+    kprobe:tcp_v4_rcv is definitely a few micro seconds sooner in the stack than tracepoint:sock:inet_sock_set_stat,
+    but it should come with much more overhead in high-volume/traffic environments.
+*/
 tracepoint:sock:inet_sock_set_state /args->newstate == (int32)TCP_ESTABLISHED/ {
 
     $daddr = ntop(args->daddr);
@@ -44,48 +54,19 @@ tracepoint:sock:inet_sock_set_state /args->newstate == (int32)TCP_ESTABLISHED/ {
     $dport = args->dport;
     $sport = args->sport;
 
-    if(@start[tid,$daddr, $saddr, $dport]) {
-        $diff = (nsecs - @start[tid,$daddr, $saddr, $dport]) / 1000;
-        @duration[tid,$daddr, $saddr, $dport] = $diff; // Report microseconds
-        @duration_hist[tid,$daddr, $saddr, $dport] = hist($diff);
-        delete(@start[tid,$daddr, $saddr, $dport]);  
+    if(@start[tid,$daddr, $saddr, $dport, $sport]) {
+        $diff = (nsecs - @start[tid,$daddr, $saddr, $dport, $sport]) / 1000;
+        @duration[tid,$daddr, $saddr, $dport, $sport] = $diff; // Report microseconds
+        @duration_hist = hist($diff);
+        delete(@start[tid,$daddr, $saddr, $dport, $sport]);  
     }
 }
 
-
-
-/*
-    This is definitely a few micro seconds sooner in the stack than tracepoint:sock:inet_sock_set_stat,
-    but it should come with much more overhead in high-volume/traffic environments.
-*/
-/*
-    References:
-        https://elixir.bootlin.com/linux/v5.8.10/source/include/linux/skbuff.h#L2483
-*/
-/*
-kprobe:tcp_v4_rcv {
-    $skb = (struct sk_buff *)arg0;
-    $ip_header = (struct iphdr *)($skb->head + $skb->network_header);
-    $tcp_header = (struct tcphdr *)($skb->head + $skb->transport_header);
-
-    $daddr = ntop($ip_header->daddr);
-    $saddr = ntop($ip_header->saddr);
-    
-    $dport = $tcp_header->dest >> 8 | (($tcp_header->dest << 8) & 0xff00);
-    $sport = $tcp_header->source >> 8 | (($tcp_header->source << 8) & 0xff00);
-
-    if(@start[tid,$saddr, $daddr, $sport]) {
-        $diff = (nsecs - @start[tid,$saddr, $daddr, $sport]) / 1000; // Report microseconds
-        @duration[tid,$saddr, $daddr, $sport] = diff; 
-        @duration_hist[tid,$saddr, $daddr, $sport] = hist(diff);
-        delete(@start[tid,$saddr, $daddr, $sport]);  // saddr and daddr are reversed through out all this, compared to tcp_v4_send_synack because of the direction of the packet.
-    }
-}
-*/
 
 
 END {
-    printf("\n\n");
+    
+    printf("\n\n[TID, Remote Addr, Local Addr, Remote Port, Local (Listening) Port] = Latency Microseconds\n\n");
     print(@duration);
     print(@duration_hist);
     
