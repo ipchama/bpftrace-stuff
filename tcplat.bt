@@ -6,7 +6,9 @@
 *  This attempts to "passively" measure latency between a server and remote clients by measuring the time
 *  between SYN-ACK and the final ACK of a typical TCP handshake.
 *
-*  NOTE: This won't work for fast opens.
+*  NOTE: This won't work for fast opens,
+*        and inet_sock_set_state requires a newer kernel.  >= 5.4 should work.
+*        For older kernels, switch to another kprobe for the second probe:  kprobe:tcp_v4_rcv or kprobe:tcp_set_state
 *
 */
 
