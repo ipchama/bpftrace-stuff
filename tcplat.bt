@@ -36,8 +36,8 @@ kprobe:tcp_v4_send_synack /arg5 == TCP_SYNACK_NORMAL/ {
     $dport = ($sock->__req_common.skc_dport >> 8 | (($sock->__req_common.skc_dport << 8) & 0xff00));
     $sport = $sock->__req_common.skc_num;
 
-        if(!@start[tid,$daddr,$saddr, $dport, $sport]){
-            @start[tid,$daddr,$saddr, $dport, $sport] = nsecs;
+        if(!@start[pid, tid,$daddr,$saddr, $dport, $sport]){
+            @start[pid, tid,$daddr,$saddr, $dport, $sport] = nsecs;
         }
 
 }
@@ -56,11 +56,11 @@ tracepoint:sock:inet_sock_set_state /args->newstate == (int32)TCP_ESTABLISHED/ {
     $dport = args->dport;
     $sport = args->sport;
 
-    if(@start[tid,$daddr, $saddr, $dport, $sport]) {
-        $diff = (nsecs - @start[tid,$daddr, $saddr, $dport, $sport]) / 1000;
-        @duration[tid,$daddr, $saddr, $dport, $sport] = $diff; // Report microseconds
+    if(@start[pid, tid,$daddr, $saddr, $dport, $sport]) {
+        $diff = (nsecs - @start[pid, tid,$daddr, $saddr, $dport, $sport]) / 1000;
+        @duration[pid, tid,$daddr, $saddr, $dport, $sport] = $diff; // Report microseconds
         @duration_hist = hist($diff);
-        delete(@start[tid,$daddr, $saddr, $dport, $sport]);  
+        delete(@start[pid, tid,$daddr, $saddr, $dport, $sport]);  
     }
 }
 
@@ -68,7 +68,7 @@ tracepoint:sock:inet_sock_set_state /args->newstate == (int32)TCP_ESTABLISHED/ {
 
 END {
     
-    printf("\n\n[TID, Remote Addr, Local Addr, Remote Port, Local (Listening) Port] = Latency Microseconds\n\n");
+    printf("\n\n[PID, TID, Remote Addr, Local Addr, Remote Port, Local (Listening) Port] = Latency Microseconds\n\n");
     print(@duration);
     print(@duration_hist);
     
